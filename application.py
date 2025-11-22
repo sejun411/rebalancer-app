@@ -204,7 +204,7 @@ if check_password():
 
         st.subheader("💡 Step2. 리밸런싱 계산하기")
         st.markdown("- 아래에 추가 납입액 (원)을 입력하고 '🧮리밸런싱 계산' 버튼을 클릭해 주세요.")
-        st.markdown("- 추가 납입액이 없는데 총 조정 금액이 +플러스라면, 추가 납입을 하거나 매수하는 조정수량 임의 조정이 필요합니다.")
+        st.markdown("- 가용 금액 안에서 비중에 최대한 가깝게 조정하여 계산합니다.")
         # 월별 납입액 입력 (천 단위 콤마 표시)
         monthly_contrib_input = st.text_input("**추가 납입액 (원)**", value="0")
         # 입력값에서 콤마 제거 후 숫자로 변환
@@ -219,42 +219,120 @@ if check_password():
 
         # Rebalance calculation
         include_contrib = st.checkbox('리밸런싱에 추가 납입액 반영하여 계산할지 체크', value=True)
-        if st.button('🧮리밸런싱 계산'): 
-            # 월별 납입액을 포함한 조정 총액
-            adjusted_total_value = total_value + (monthly_contrib if include_contrib else 0)
+        if st.button('🧮리밸런싱 계산'):
+            # 사용가능 총자산 (현 보유 평가액 + (납입 허용 시) 추가 납입)
+            usable_value = total_value + (monthly_contrib if include_contrib else 0)
 
-            # 리밸런싱 목표 금액은 납입액이 반영된 총 금액 기준
-            target_value = adjusted_total_value * portfolio['weight']
-            target_qty = (target_value / portfolio['price']).fillna(0).round(0).astype(int)
-            adjust_qty = (target_qty - portfolio['qty']).round(0).astype(int)
-            result = portfolio.copy()
+            # 안전 복사본
+            df = portfolio.copy().reset_index(drop=True)
+            df = df[['ticker','name','price','qty','weight']].copy()
+            df['price'] = df['price'].astype(float)
+            df['qty'] = df['qty'].astype(int)
+            df['weight'] = df['weight'].astype(float)  # 비율 (0~1)
 
-            # 원래 비중(업로드한 weight 그대로)
-            result['orig_weight'] = result['weight']
+            # 연산에 쓸 기본 값
+            current_qty = df['qty'].to_numpy()
+            prices = df['price'].to_numpy()
+            target_weights = df['weight'].to_numpy()
+            n = len(df)
 
-            # 조정 후 평가액
-            result['final_value'] = target_qty * result['price']
+            # 초기 해: 현재 보유수량 (우선 현재 수량에서 시작하여 한주씩 증감 탐색)
+            new_qty = current_qty.copy()
 
-            # 조정 후 비중
-            result['final_weight'] = result['final_value'] / result['final_value'].sum()
+            # 현재 순매수로 필요한 순현금 계산 함수
+            def net_cash_required(proposed_qty):
+                buys = np.clip(proposed_qty - current_qty, 0, None)  # 매수 수량
+                sells = np.clip(current_qty - proposed_qty, 0, None)  # 매도 수량
+                total_buy_value = np.sum(buys * prices)
+                total_sell_value = np.sum(sells * prices)
+                net = total_buy_value - total_sell_value
+                return max(0.0, net)  # 순매수 필요현금 (매도가 많으면 0)
 
-            # 비중 편차 (조정 후 비중 - 원래 비중)
-            result['weight_diff'] = result['final_weight'] - result['orig_weight']
+            # 목적함수: usable_value 기준으로 각 종목 비중 오차 제곱합
+            def objective(proposed_qty):
+                invested_values = proposed_qty * prices  # 투자된 금액(현금 잔여는 usable_value - invested_sum)
+                # 실제 비중 = invested / usable_value  (현금 잔여도 고려되어 목표비중 0에 대해 패널티)
+                actual_weights = invested_values / (usable_value if usable_value > 0 else 1)
+                # squared error (목표는 target_weights)
+                return float(np.sum((actual_weights - target_weights) ** 2))
 
-            result['orig_weight'] = result['weight']
+            # 탐색 제약: 납입 허용액
+            cash_limit = monthly_contrib if include_contrib else 0.0
+
+            # 기본 허용 여부: 현재 상태에서 net cash <= cash_limit 이어야 함 (대개 0)
+            # 탐색 루프: 한 번에 한 주씩 증감(증가 혹은 감소)하면서 목적함수 개선이 있으면 적용
+            max_iter = 20000  # 안전 상한
+            iter_count = 0
+            improved = True
+            best_qty = new_qty.copy()
+            best_obj = objective(best_qty)
+
+            # 우선, rounding 방식으로 초기 근사: 목표(continuous) 기반으로 floor/round 시도 후 출발해도 좋음.
+            # continuous_target_qty = np.floor((usable_value * target_weights) / prices).astype(int)
+            # new_qty = np.maximum(0, continuous_target_qty)
+            # But we start from current_qty to allow selling to free cash.
+
+            while improved and iter_count < max_iter:
+                improved = False
+                iter_count += 1
+
+                # 후보: 각 종목에 대해 +1 혹은 -1 변경 후보를 평가
+                best_local_improvement = 0.0
+                best_local_qty = None
+
+                for i in range(n):
+                    # 후보1: 한 주 추가 (buy 1)
+                    cand_qty = best_qty.copy()
+                    cand_qty[i] += 1
+                    # 구매 후 필요한 순현금
+                    need_cash = net_cash_required(cand_qty)
+                    if need_cash <= cash_limit + 1e-6:  # 허용 범위라면 평가
+                        obj = objective(cand_qty)
+                        improvement = best_obj - obj
+                        if improvement > best_local_improvement + 1e-12:
+                            best_local_improvement = improvement
+                            best_local_qty = cand_qty.copy()
+
+                    # 후보2: 한 주 판매 (sell 1) - 단, qty >=1 이어야 함
+                    if best_qty[i] > 0:
+                        cand_qty2 = best_qty.copy()
+                        cand_qty2[i] -= 1
+                        need_cash2 = net_cash_required(cand_qty2)
+                        if need_cash2 <= cash_limit + 1e-6:
+                            obj2 = objective(cand_qty2)
+                            improvement2 = best_obj - obj2
+                            if improvement2 > best_local_improvement + 1e-12:
+                                best_local_improvement = improvement2
+                                best_local_qty = cand_qty2.copy()
+
+                # 지역 최적 후보가 있으면 적용
+                if best_local_qty is not None and best_local_improvement > 1e-12:
+                    best_qty = best_local_qty.copy()
+                    best_obj = objective(best_qty)
+                    improved = True
+
+            # 최종 결과를 데이터프레임에 반영
+            result = df.copy()
+            result['orig_weight'] = result['weight']  # 원래 목표비중(0~1)
             result['price'] = result['price'].round().astype(int)
-            result['qty'] = result['qty'].round().astype(int)
-            result['target_qty'] = target_qty
-            result['adjust_qty'] = adjust_qty
+            result['qty'] = result['qty'].astype(int)
+            result['target_qty'] = best_qty.astype(int)
+            result['adjust_qty'] = result['target_qty'] - result['qty']
             result['adjust_value'] = (result['adjust_qty'] * result['price']).astype(int)
+            result['final_value'] = result['target_qty'] * result['price']
+            # 최종 실제 비중 (usable_value 기준)
+            result['final_weight'] = result['final_value'] / (usable_value if usable_value > 0 else 1)
+            result['weight_diff'] = result['final_weight'] - result['orig_weight']
             result['direction'] = result['adjust_qty'].apply(lambda x: '📈' if x > 0 else ('📉' if x < 0 else ''))
-            result['adjust_qty_display'] = result['direction'] + ' ' + result['adjust_qty'].astype(str)
-            result['adjust_qty_display'] = result.apply(lambda row: f"{row['direction']} {row['adjust_qty']:+}" , axis=1)
+            result['adjust_qty_display'] = result.apply(lambda row: f"{row['direction']} {row['adjust_qty']:+}", axis=1)
+
             # 저장을 위해 세션에 최근 계산 결과 보관
             st.session_state['last_result'] = result
             st.session_state['last_total_value'] = float(total_value)
             st.session_state['last_monthly_contrib'] = float(monthly_contrib)
-            st.markdown("**📋 리밸런싱 결과**")
+
+            # 출력
+            st.markdown("**📋 리밸런싱 결과 (최적화 적용)**")
             st.dataframe(
                 result[['ticker','name','price','qty','target_qty','adjust_qty_display','final_weight','orig_weight',
                         'adjust_value']]
@@ -278,5 +356,17 @@ if check_password():
                     '조정금액': '{:,.0f}'
                 })
             )
+
             st.markdown('---')
-            st.write('총 조정(매수:+, 매도:-) 금액:', f"{result['adjust_value'].sum():,.0f} 원")
+
+            # 총 조정금액(매수:+, 매도:-) 및 순매수 필요현금 표시
+            total_adjust = result['adjust_value'].sum()
+            net_needed = net_cash_required(result['target_qty'].to_numpy())
+            st.write('총 조정(매수:+, 매도:-) 금액:', f"{total_adjust:,.0f} 원")
+            st.write('순매수로 실제 필요한 현금:', f"{net_needed:,.0f} 원")
+            # (추가 납입 허용액: {cash_limit:,.0f} 원)")
+
+            if net_needed > cash_limit + 1e-6:
+                st.error("※ 내부 오류: 계산된 순매수 필요현금이 허용 범위를 초과합니다.")
+            else:
+                st.success("✔ 계산된 조정안은 사용 가능한 자금 제약을 만족합니다.")
