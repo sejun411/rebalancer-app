@@ -37,9 +37,9 @@ if check_password():
 
     st.markdown("""
     - 업로드할 CSV 포맷: **ticker,weight,qty**
-    - 예: `069500,40,15`  (weight(가중치)는 합이 100이어야 함)
+    - 예: `069500,40,15`  ※ weight(비중)은 합이 100이어야 함
     - 리밸런싱은 현재가 기준으로 목표비중에 맞춰 수량을 증감 계산합니다.
-    - 저장 시 원본 파일 이름 기반으로 히스토리(리밸런싱 로그)와 수익률 기록을 생성합니다.
+    - 저장 시 원본 파일 이름 기반으로 히스토리(리밸런싱 로그)와 수익률 기록을 생성합니다. *아직 개발중
     """)
 
     import pandas as pd
@@ -201,9 +201,10 @@ if check_password():
         total_value = portfolio['market_value'].sum()
         st.markdown(f"**총 평가액:** {total_value:,.0f} 원")
         st.markdown('---')
+
         st.subheader("💡 Step2. 리밸런싱 계산하기")
         st.markdown("- 아래에 추가 납입액 (원)을 입력하고 '🧮리밸런싱 계산' 버튼을 클릭해 주세요.")
-        st.markdown("- 총 조정 금액이 마이너스(-)라면, 추가 납입액을 넣어서 다시 계산해 보세요.")
+        st.markdown("- 추가 납입액이 없는데 총 조정 금액이 +플러스라면, 추가 납입을 하거나 매수하는 조정수량 임의 조정이 필요합니다.")
         # 월별 납입액 입력 (천 단위 콤마 표시)
         monthly_contrib_input = st.text_input("**추가 납입액 (원)**", value="0")
         # 입력값에서 콤마 제거 후 숫자로 변환
