@@ -183,22 +183,37 @@ if check_password():
             portfolio['price'] = prices
             portfolio['market_value'] = portfolio['price'] * portfolio['qty']
 
+        # 총 평가액 계산
+        total_value = portfolio['market_value'].sum()
+
+        # 👉 현재 비중 컬럼 추가
+        portfolio['current_weight'] = portfolio['market_value'] / total_value
+
         st.markdown('**📌실시간 가격/평가액**')
         st.dataframe(
-            portfolio[['ticker','name','price','qty','market_value','weight']]
+            portfolio[['ticker','name','price','qty','market_value','current_weight','weight']]
             .rename(columns={
                 'ticker': '종목코드',
                 'name': '종목명',
                 'price': '가격',
                 'qty': '보유수량',
                 'market_value': '평가금액',
+                'current_weight': '현재비중',
                 'weight': '목표비중'
             })
-            .assign(목표비중=lambda df: df['목표비중'] * 100)
-            .style.format({'가격': '{:,.0f}', '보유수량': '{:,.0f}', '평가금액': '{:,.0f}', '목표비중': '{:.2f}%'})
+            .assign(
+                목표비중=lambda df: df['목표비중'] * 100,
+                현재비중=lambda df: df['현재비중'] * 100
+            )
+            .style.format({
+                '가격': '{:,.0f}',
+                '보유수량': '{:,.0f}',
+                '평가금액': '{:,.0f}',
+                '현재비중': '{:.2f}%',
+                '목표비중': '({:.2f}%)',
+            })
         )
 
-        total_value = portfolio['market_value'].sum()
         st.markdown(f"**총 평가액:** {total_value:,.0f} 원")
         st.markdown('---')
 
@@ -344,13 +359,13 @@ if check_password():
                     'target_qty': '목표수량',
                     'adjust_qty_display': '조정수량',
                     'final_weight': '조정 후 비중',
-                    'orig_weight': '(목표 비중)',
+                    'orig_weight': '목표 비중',
                     'adjust_value': '조정금액'
                 })
                 .style.format({
                     '가격': '{:,.0f}',
                     '보유수량': '{:,.0f}',
-                    '(목표 비중)': '({:.2%})',
+                    '목표 비중': '({:.2%})',
                     '조정 후 비중': '{:.2%}',
                     '목표수량': '{:,.0f}',
                     '조정금액': '{:,.0f}'
